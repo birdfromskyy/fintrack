@@ -1,12 +1,15 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -131,6 +134,9 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
+
+	// ✅ Логируем создание дефолтного аккаунта (асинхронно)
+	go s.logDefaultAccountCreation(user.ID, accountID)
 
 	return user, nil
 }
@@ -380,4 +386,51 @@ func (s *AuthService) ChangePassword(ctx context.Context, userID, currentPasswor
 	s.redis.Del(ctx, sessionKey)
 
 	return nil
+}
+
+func (s *AuthService) logDefaultAccountCreation(userID, accountID string) {
+	// Отправляем HTTP запрос в API Service для логирования
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	logData := map[string]interface{}{
+		"action": "created",
+		"data": map[string]interface{}{
+			"id":         accountID,
+			"name":       "Основной счёт",
+			"balance":    0.00,
+			"is_default": true,
+			"source":     "registration",
+		},
+	}
+
+	jsonData, err := json.Marshal(logData)
+	if err != nil {
+		log.Printf("Failed to marshal log data: %v", err)
+		return
+	}
+
+	// URL API Service (из env или hardcoded для внутренней сети Docker)
+	apiURL := "http://api-service:8082/api/v1/internal/logs"
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("Failed to create log request: %v", err)
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Service", "auth-service") // Для проверки что запрос изнутри
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to send log to api-service: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("API service returned non-OK status: %d", resp.StatusCode)
+	}
 }

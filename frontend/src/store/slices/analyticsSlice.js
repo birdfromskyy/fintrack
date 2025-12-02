@@ -91,13 +91,28 @@ export const fetchCashflow = createAsyncThunk(
 	}
 )
 
+// ✅ ИСПРАВЛЕННЫЙ EXPORT THUNK
 export const exportTransactions = createAsyncThunk(
 	'analytics/exportTransactions',
 	async (params, { rejectWithValue }) => {
 		try {
-			const response = await analyticsService.exportTransactions(params)
+			// Преобразуем camelCase в snake_case для backend
+			const backendParams = {
+				format: params.format || 'csv',
+			}
+
+			if (params.dateFrom) backendParams.date_from = params.dateFrom
+			if (params.dateTo) backendParams.date_to = params.dateTo
+			if (params.accountId) backendParams.account_id = params.accountId
+			if (params.type) backendParams.type = params.type
+
+			console.log('Export params (frontend):', params)
+			console.log('Export params (backend):', backendParams)
+
+			const response = await analyticsService.exportTransactions(backendParams)
 			return response.data
 		} catch (error) {
+			console.error('Export error:', error.response?.data || error.message)
 			return rejectWithValue(
 				error.response?.data?.error || 'Failed to export transactions'
 			)

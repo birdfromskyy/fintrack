@@ -1,14 +1,20 @@
 export const formatCurrency = (amount, showSign = false) => {
+	// Проверка на null/undefined/NaN
+	if (amount === null || amount === undefined || isNaN(amount)) {
+		return '0 ₽'
+	}
+
 	const formatted = new Intl.NumberFormat('ru-RU', {
 		style: 'currency',
 		currency: 'RUB',
 		minimumFractionDigits: 0,
 		maximumFractionDigits: 2,
-	}).format(Math.abs(amount))
+	}).format(amount) // ← БЕЗ Math.abs()!
 
 	if (showSign && amount > 0) {
 		return `+${formatted}`
 	}
+
 	return formatted
 }
 
@@ -45,10 +51,12 @@ export const formatDateTime = date => {
 }
 
 export const formatPercent = (value, decimals = 1) => {
+	if (value === null || value === undefined || isNaN(value)) return '0%'
 	return `${value.toFixed(decimals)}%`
 }
 
 export const formatNumber = (value, decimals = 0) => {
+	if (value === null || value === undefined || isNaN(value)) return '0'
 	return new Intl.NumberFormat('ru-RU', {
 		minimumFractionDigits: decimals,
 		maximumFractionDigits: decimals,
@@ -70,13 +78,20 @@ export const getRelativeTime = date => {
 	const days = Math.floor(hours / 24)
 
 	if (days > 0) {
-		return `${days} ${days === 1 ? 'день' : 'дней'} назад`
+		return `${days} ${days === 1 ? 'день' : days < 5 ? 'дня' : 'дней'} назад`
 	}
+
 	if (hours > 0) {
-		return `${hours} ${hours === 1 ? 'час' : 'часов'} назад`
+		return `${hours} ${
+			hours === 1 ? 'час' : hours < 5 ? 'часа' : 'часов'
+		} назад`
 	}
+
 	if (minutes > 0) {
-		return `${minutes} ${minutes === 1 ? 'минуту' : 'минут'} назад`
+		return `${minutes} ${
+			minutes === 1 ? 'минуту' : minutes < 5 ? 'минуты' : 'минут'
+		} назад`
 	}
+
 	return 'только что'
 }

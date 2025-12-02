@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -12,11 +13,15 @@ import (
 )
 
 type TransactionService struct {
-	db *sql.DB
+	db         *sql.DB
+	logService *LogService
 }
 
-func NewTransactionService(db *sql.DB) *TransactionService {
-	return &TransactionService{db: db}
+func NewTransactionService(db *sql.DB, logService *LogService) *TransactionService {
+	return &TransactionService{
+		db:         db,
+		logService: logService,
+	}
 }
 
 func (s *TransactionService) CreateTransaction(ctx context.Context, userID string, req *models.CreateTransactionRequest) (*models.Transaction, error) {
@@ -110,7 +115,31 @@ func (s *TransactionService) CreateTransaction(ctx context.Context, userID strin
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
+	// ✅ Детальное логирование создания
+	logDetails := map[string]interface{}{
+		"action": "created",
+		"data": map[string]interface{}{
+			"id":          transaction.ID,
+			"type":        transaction.Type,
+			"amount":      transaction.Amount,
+			"description": transaction.Description,
+			"date":        transaction.Date.Format("2006-01-02"),
+			"account_id":  transaction.AccountID,
+			"category_id": transaction.CategoryID,
+		},
+	}
+	detailsJSON, _ := json.Marshal(logDetails)
+
+	go s.logService.Log(context.Background(), &UserAction{
+		UserID:   userID,
+		Action:   "create",
+		Entity:   "transaction",
+		EntityID: transaction.ID,
+		Details:  string(detailsJSON),
+	})
+
 	return transaction, nil
+
 }
 
 func (s *TransactionService) GetTransactions(ctx context.Context, filter *models.TransactionFilter) ([]*models.Transaction, error) {
@@ -248,6 +277,8 @@ func (s *TransactionService) UpdateTransaction(ctx context.Context, userID, tran
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 
+	changes := make(map[string]map[string]interface{})
+
 	// Revert old transaction from account balance
 	if oldTransaction.Type == "income" {
 		_, err = tx.ExecContext(ctx,
@@ -264,35 +295,65 @@ func (s *TransactionService) UpdateTransaction(ctx context.Context, userID, tran
 	}
 
 	// Update transaction fields
-	if req.AccountID != "" {
+	if req.AccountID != "" && req.AccountID != oldTransaction.AccountID {
+		changes["account_id"] = map[string]interface{}{
+			"old": oldTransaction.AccountID,
+			"new": req.AccountID,
+		}
 		oldTransaction.AccountID = req.AccountID
 	}
-	if req.CategoryID != "" {
+
+	if req.CategoryID != "" && req.CategoryID != oldTransaction.CategoryID {
 		// Get new category type
 		var categoryType string
 		err = tx.QueryRowContext(ctx,
 			`SELECT type FROM categories WHERE id = $1 AND (user_id = $2 OR is_system = true)`,
 			req.CategoryID, userID).Scan(&categoryType)
-
 		if err != nil {
 			return nil, fmt.Errorf("failed to get category type: %w", err)
+		}
+
+		changes["category_id"] = map[string]interface{}{
+			"old": oldTransaction.CategoryID,
+			"new": req.CategoryID,
+		}
+		changes["type"] = map[string]interface{}{
+			"old": oldTransaction.Type,
+			"new": categoryType,
 		}
 
 		oldTransaction.CategoryID = req.CategoryID
 		oldTransaction.Type = categoryType
 	}
-	if req.Amount > 0 {
+
+	if req.Amount > 0 && req.Amount != oldTransaction.Amount {
+		changes["amount"] = map[string]interface{}{
+			"old": oldTransaction.Amount,
+			"new": req.Amount,
+		}
 		oldTransaction.Amount = req.Amount
 	}
-	if req.Description != "" {
+
+	if req.Description != "" && req.Description != oldTransaction.Description {
+		changes["description"] = map[string]interface{}{
+			"old": oldTransaction.Description,
+			"new": req.Description,
+		}
 		oldTransaction.Description = req.Description
 	}
+
 	if req.Date != "" {
 		transactionDate, err := time.Parse("2006-01-02", req.Date)
 		if err != nil {
 			return nil, fmt.Errorf("invalid date format, expected YYYY-MM-DD: %w", err)
 		}
-		oldTransaction.Date = transactionDate
+		if !transactionDate.Equal(oldTransaction.Date) {
+			changes["date"] = map[string]interface{}{
+				"old": oldTransaction.Date.Format("2006-01-02"),
+				"new": transactionDate.Format("2006-01-02"),
+			}
+			oldTransaction.Date = transactionDate
+		}
 	}
 
 	oldTransaction.UpdatedAt = time.Now()
@@ -329,7 +390,25 @@ func (s *TransactionService) UpdateTransaction(ctx context.Context, userID, tran
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
+	// ✅ Логирование только если были изменения
+	if len(changes) > 0 {
+		logDetails := map[string]interface{}{
+			"action":  "updated",
+			"changes": changes,
+		}
+		detailsJSON, _ := json.Marshal(logDetails)
+
+		go s.logService.Log(context.Background(), &UserAction{
+			UserID:   userID,
+			Action:   "update",
+			Entity:   "transaction",
+			EntityID: transactionID,
+			Details:  string(detailsJSON),
+		})
+	}
+
 	return &oldTransaction, nil
+
 }
 
 func (s *TransactionService) DeleteTransaction(ctx context.Context, userID, transactionID string) error {
@@ -391,6 +470,25 @@ func (s *TransactionService) DeleteTransaction(ctx context.Context, userID, tran
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+
+	// ✅ Детальное логирование удаления
+	logDetails := map[string]interface{}{
+		"action": "deleted",
+		"data": map[string]interface{}{
+			"account_id": accountID,
+			"type":       transactionType,
+			"amount":     amount,
+		},
+	}
+	detailsJSON, _ := json.Marshal(logDetails)
+
+	go s.logService.Log(context.Background(), &UserAction{
+		UserID:   userID,
+		Action:   "delete",
+		Entity:   "transaction",
+		EntityID: transactionID,
+		Details:  string(detailsJSON),
+	})
 
 	return nil
 }

@@ -71,7 +71,23 @@ func createTables(db *sql.DB) error {
 
 		`DROP TRIGGER IF EXISTS update_transactions_updated_at ON transactions;`,
 		`CREATE TRIGGER update_transactions_updated_at BEFORE UPDATE ON transactions
-            FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();`,
+								FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();`,
+		`CREATE TABLE IF NOT EXISTS user_actions (
+				id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+				user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				action VARCHAR(50) NOT NULL,
+				entity VARCHAR(50) NOT NULL,
+				entity_id UUID,
+				details TEXT,
+				ip VARCHAR(45),
+				user_agent TEXT,
+				created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+		);`,
+
+		`CREATE INDEX IF NOT EXISTS idx_user_actions_user_id ON user_actions(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_actions_created_at ON user_actions(created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_actions_action ON user_actions(action);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_actions_entity ON user_actions(entity);`,
 	}
 
 	for _, query := range queries {

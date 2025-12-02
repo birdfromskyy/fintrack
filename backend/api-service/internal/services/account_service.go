@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -12,11 +13,15 @@ import (
 )
 
 type AccountService struct {
-	db *sql.DB
+	db         *sql.DB
+	logService *LogService
 }
 
-func NewAccountService(db *sql.DB) *AccountService {
-	return &AccountService{db: db}
+func NewAccountService(db *sql.DB, logService *LogService) *AccountService {
+	return &AccountService{
+		db:         db,
+		logService: logService,
+	}
 }
 
 func (s *AccountService) CreateAccount(ctx context.Context, userID string, req *models.CreateAccountRequest) (*models.Account, error) {
@@ -59,6 +64,26 @@ func (s *AccountService) CreateAccount(ctx context.Context, userID string, req *
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
+
+	// ✅ Логирование
+	logDetails := map[string]interface{}{
+		"action": "created",
+		"data": map[string]interface{}{
+			"id":         account.ID,
+			"name":       account.Name,
+			"balance":    account.Balance,
+			"is_default": account.IsDefault,
+		},
+	}
+	detailsJSON, _ := json.Marshal(logDetails)
+
+	go s.logService.Log(context.Background(), &UserAction{
+		UserID:   userID,
+		Action:   "create",
+		Entity:   "account",
+		EntityID: account.ID,
+		Details:  string(detailsJSON),
+	})
 
 	return account, nil
 }
@@ -107,31 +132,42 @@ func (s *AccountService) GetAccount(ctx context.Context, userID, accountID strin
 }
 
 func (s *AccountService) UpdateAccount(ctx context.Context, userID, accountID string, req *models.UpdateAccountRequest) (*models.Account, error) {
-	// Check if account exists and belongs to user
-	var exists bool
-	err := s.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2)`,
-		accountID, userID).Scan(&exists)
-
+	// ✅ ШАГ 1: Получаем СТАРЫЙ аккаунт (до изменений)
+	oldAccount, err := s.GetAccount(ctx, userID, accountID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check account: %w", err)
+		return nil, err // Уже содержит "account not found" если не найден
 	}
 
-	if !exists {
-		return nil, fmt.Errorf("account not found")
-	}
-
-	// Build update query
+	// ✅ ШАГ 2: Build update query + отслеживаем изменения
 	updateFields := make(map[string]interface{})
-	if req.Name != "" {
+	changes := make(map[string]map[string]interface{}) // ← Для логов
+
+	// Сравниваем Name
+	if req.Name != "" && req.Name != oldAccount.Name {
 		updateFields["name"] = req.Name
+		changes["name"] = map[string]interface{}{
+			"old": oldAccount.Name,
+			"new": req.Name,
+		}
 	}
-	if req.Balance != 0 {
+
+	// Сравниваем Balance
+	if req.Balance != 0 && req.Balance != oldAccount.Balance {
 		updateFields["balance"] = req.Balance
+		changes["balance"] = map[string]interface{}{
+			"old": oldAccount.Balance,
+			"new": req.Balance,
+		}
 	}
+
+	// Если изменений нет — ничего не делаем
+	if len(updateFields) == 0 {
+		return oldAccount, nil
+	}
+
 	updateFields["updated_at"] = time.Now()
 
-	// Execute update
+	// ✅ ШАГ 3: Execute update
 	query := `UPDATE accounts SET `
 	args := []interface{}{}
 	i := 1
@@ -151,6 +187,23 @@ func (s *AccountService) UpdateAccount(ctx context.Context, userID, accountID st
 	_, err = s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update account: %w", err)
+	}
+
+	// ✅ ШАГ 4: Логирование с деталями "было → стало"
+	if len(changes) > 0 {
+		logDetails := map[string]interface{}{
+			"action":  "updated",
+			"changes": changes,
+		}
+		detailsJSON, _ := json.Marshal(logDetails)
+
+		go s.logService.Log(context.Background(), &UserAction{
+			UserID:   userID,
+			Action:   "update",
+			Entity:   "account",
+			EntityID: accountID,
+			Details:  string(detailsJSON),
+		})
 	}
 
 	return s.GetAccount(ctx, userID, accountID)
@@ -185,24 +238,27 @@ func (s *AccountService) DeleteAccount(ctx context.Context, userID, accountID st
 		return fmt.Errorf("cannot delete account with existing transactions")
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// Check if it's default account
+	// ✅ ШАГ 1: Сохраняем данные аккаунта ДО удаления (для логов)
+	var accountName string
+	var balance float64
 	var isDefault bool
-	err = tx.QueryRowContext(ctx,
-		`SELECT is_default FROM accounts WHERE id = $1 AND user_id = $2`,
-		accountID, userID).Scan(&isDefault)
+	err = s.db.QueryRowContext(ctx,
+		`SELECT name, balance, is_default FROM accounts WHERE id = $1 AND user_id = $2`,
+		accountID, userID).Scan(&accountName, &balance, &isDefault)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("account not found")
 		}
-		return fmt.Errorf("failed to check account: %w", err)
+		return fmt.Errorf("failed to get account info: %w", err)
 	}
+
+	// ✅ ШАГ 2: Начинаем транзакцию
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	// Delete account
 	result, err := tx.ExecContext(ctx,
@@ -226,9 +282,9 @@ func (s *AccountService) DeleteAccount(ctx context.Context, userID, accountID st
 	if isDefault {
 		_, err = tx.ExecContext(ctx,
 			`UPDATE accounts SET is_default = true 
-             WHERE user_id = $1 
-             ORDER BY created_at ASC 
-             LIMIT 1`,
+			WHERE user_id = $1 
+			ORDER BY created_at ASC 
+			LIMIT 1`,
 			userID)
 
 		if err != nil {
@@ -239,6 +295,25 @@ func (s *AccountService) DeleteAccount(ctx context.Context, userID, accountID st
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+
+	// ✅ ШАГ 3: Логирование с деталями удалённого аккаунта
+	logDetails := map[string]interface{}{
+		"action": "deleted",
+		"data": map[string]interface{}{
+			"name":       accountName,
+			"balance":    balance,
+			"is_default": isDefault,
+		},
+	}
+	detailsJSON, _ := json.Marshal(logDetails)
+
+	go s.logService.Log(context.Background(), &UserAction{
+		UserID:   userID,
+		Action:   "delete",
+		Entity:   "account",
+		EntityID: accountID,
+		Details:  string(detailsJSON),
+	})
 
 	return nil
 }

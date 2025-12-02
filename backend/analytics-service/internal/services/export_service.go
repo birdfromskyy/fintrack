@@ -72,6 +72,7 @@ func (s *ExportService) ExportTransactionsCSV(ctx context.Context, req *models.E
 
 	rows, err := s.postgresDB.QueryContext(ctx, query, args...)
 	if err != nil {
+		log.Printf("Failed to query transactions: %v", err)
 		return nil, fmt.Errorf("failed to query transactions: %w", err)
 	}
 	defer rows.Close()
@@ -87,6 +88,7 @@ func (s *ExportService) ExportTransactionsCSV(ctx context.Context, req *models.E
 	}
 
 	// Write data
+	rowCount := 0
 	for rows.Next() {
 		var (
 			id          string
@@ -100,7 +102,14 @@ func (s *ExportService) ExportTransactionsCSV(ctx context.Context, req *models.E
 
 		err := rows.Scan(&id, &date, &category, &txType, &amount, &description, &account)
 		if err != nil {
+			log.Printf("Failed to scan row: %v", err)
 			continue
+		}
+
+		// ✅ Форматируем сумму с учётом типа (расходы с минусом)
+		amountFormatted := fmt.Sprintf("%.2f", amount)
+		if txType == "expense" {
+			amountFormatted = fmt.Sprintf("-%.2f", amount)
 		}
 
 		record := []string{
@@ -108,7 +117,7 @@ func (s *ExportService) ExportTransactionsCSV(ctx context.Context, req *models.E
 			date.Format("2006-01-02"),
 			category,
 			txType,
-			fmt.Sprintf("%.2f", amount),
+			amountFormatted, // ← ИСПРАВЛЕНО
 			description.String,
 			account,
 		}
@@ -116,12 +125,15 @@ func (s *ExportService) ExportTransactionsCSV(ctx context.Context, req *models.E
 		if err := writer.Write(record); err != nil {
 			return nil, fmt.Errorf("failed to write CSV record: %w", err)
 		}
+		rowCount++
 	}
 
 	writer.Flush()
 	if err := writer.Error(); err != nil {
 		return nil, fmt.Errorf("CSV writer error: %w", err)
 	}
+
+	log.Printf("Exported %d transactions for user %s", rowCount, req.UserID)
 
 	// Log export action
 	s.logExport(ctx, req.UserID, "transactions", req.Format)
@@ -515,6 +527,12 @@ func (s *ExportService) getAccountsTable(ctx context.Context, userID string) (*m
 }
 
 func (s *ExportService) logExport(ctx context.Context, userID, exportType, format string) {
+	// ✅ Проверяем что ClickHouse подключён
+	if s.clickhouseDB == nil {
+		log.Printf("ClickHouse not connected, skipping export log")
+		return
+	}
+
 	query := `INSERT INTO user_actions (user_id, action, entity, details) VALUES (?, ?, ?, ?)`
 	details := fmt.Sprintf("type: %s, format: %s", exportType, format)
 	err := s.clickhouseDB.Exec(ctx, query, userID, "export", exportType, details)

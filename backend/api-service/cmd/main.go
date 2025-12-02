@@ -40,9 +40,10 @@ func main() {
 	defer redisClient.Close()
 
 	// Initialize services
-	transactionService := services.NewTransactionService(db)
-	accountService := services.NewAccountService(db)
-	categoryService := services.NewCategoryService(db)
+	logService := services.NewLogService(db)
+	transactionService := services.NewTransactionService(db, logService)
+	accountService := services.NewAccountService(db, logService)
+	categoryService := services.NewCategoryService(db, logService)
 	statsService := services.NewStatsService(db)
 
 	// Initialize handlers
@@ -50,6 +51,7 @@ func main() {
 	accountHandler := handlers.NewAccountHandler(accountService)
 	categoryHandler := handlers.NewCategoryHandler(categoryService)
 	statsHandler := handlers.NewStatsHandler(statsService)
+	logHandler := handlers.NewLogHandler(logService)
 
 	// Setup Gin router
 	router := gin.New()
@@ -61,6 +63,12 @@ func main() {
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok", "service": "api-service"})
 	})
+
+	// ✅ ДОБАВЬ ЭТО: Internal routes (для других микросервисов)
+	internal := router.Group("/api/v1/internal")
+	{
+		internal.POST("/logs", logHandler.LogInternalAction)
+	}
 
 	// Protected API routes
 	api := router.Group("/api/v1")
@@ -93,6 +101,11 @@ func main() {
 		api.GET("/stats/monthly", statsHandler.GetMonthlyStats)
 		api.GET("/stats/category", statsHandler.GetCategoryStats)
 		api.GET("/stats/balance-history", statsHandler.GetBalanceHistory)
+
+		// Log routes
+		api.GET("/logs", logHandler.GetMyLogs)        // Мои логи
+		api.GET("/logs/stats", logHandler.GetMyStats) // Моя статистика
+		api.GET("/logs/all", logHandler.GetAllLogs)   // Все логи (для админа)
 	}
 
 	// Server setup

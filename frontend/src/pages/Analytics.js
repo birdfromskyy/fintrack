@@ -160,9 +160,10 @@ const Analytics = () => {
 		  }))
 		: []
 
-	// ✅ ИСПРАВЛЕНО: Используем category_name вместо categoryName
-	const categoryChartData = topCategories.slice(0, 5).map(c => ({
-		name: c.category_name || c.name, // Поддерживаем оба формата
+	// ✅ ИСПРАВЛЕНО: Фильтруем только расходы для диаграммы
+	const expenseCategories = topCategories.filter(c => c.type === 'expense')
+	const categoryChartData = expenseCategories.slice(0, 5).map(c => ({
+		name: c.category_name || c.name,
 		value: c.amount || 0,
 		percentage: c.percentage || 0,
 	}))
@@ -522,7 +523,7 @@ const Analytics = () => {
 				<Grid item xs={12} md={4}>
 					<Paper sx={{ p: 3 }}>
 						<Typography variant='h6' gutterBottom>
-							Распределение по категориям
+							Распределение расходов по категориям
 						</Typography>
 						{categoryChartData.length > 0 ? (
 							<ResponsiveContainer width='100%' height={300}>
